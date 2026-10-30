@@ -1,0 +1,25 @@
+--- a/options/rtld/generic/main.cpp
++++ b/options/rtld/generic/main.cpp
+@@ -633,6 +633,22 @@
+ 	executableSO = initialRepository->injectStaticObject(execfn,
+ 			frg::string<MemoryAllocator>{ execfn, getAllocator() },
+ 			phdr_pointer, phdr_entry_size, phdr_count, entry_pointer, 1);
++	// rbOS/static-PIE: modern binutils omit PT_PHDR for static links, so
++	// _fetchFromPhdrs leaves baseAddress at 0 AND leaves dynamic/tlsImagePtr
++	// computed against that zero base. A static PIE still carries a
++	// .dynamic (plain ET_EXEC statics have dynamic == nullptr and never
++	// use the base), so derive the base from the runtime header address:
++	// the headers live in the first LOAD where file offset == vaddr,
++	// hence base = phdr_pointer - e_phoff. phdr_pointer is already
++	// runtime-correct here (rcrt1.o self-relocated before __mlibc_entry
++	// ran). All base-derived pointers must be shifted together.
++	if(executableSO->dynamic && !executableSO->baseAddress) {
++		auto base = (uintptr_t)phdr_pointer - ehdr->e_phoff;
++		executableSO->baseAddress = base;
++		executableSO->dynamic = (elf_dyn *)((uintptr_t)executableSO->dynamic + base);
++		if(executableSO->tlsImagePtr)
++			executableSO->tlsImagePtr = (void *)((uintptr_t)executableSO->tlsImagePtr + base);
++	}
+ 	globalDebugInterface.base = (void*)executableSO->baseAddress;
+ #endif
+ 

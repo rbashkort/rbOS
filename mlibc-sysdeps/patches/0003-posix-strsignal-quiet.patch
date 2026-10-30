@@ -1,0 +1,21 @@
+--- a/options/posix/generic/posix_string.cpp
++++ b/options/posix/generic/posix_string.cpp
+@@ -115,9 +115,16 @@
+ 	CASE_FOR(SIGXCPU)
+ 	CASE_FOR(SIGXFSZ)
+ 	CASE_FOR(SIGWINCH)
++	CASE_FOR(SIGSTKFLT)
+ 	default:
+-		mlibc::infoLogger() << "mlibc: Unknown signal number " << sig << frg::endlog;
+-		s = "Unknown signal number";
++		// Callers are allowed to probe numbers that have no name (oksh
++		// iterates 0..NSIG at init), so stay quiet per POSIX and just
++		// return a descriptive string.
++		if(sig >= SIGRTMIN && sig <= SIGRTMAX) {
++			s = "Real-time signal";
++		} else {
++			s = "Unknown signal";
++		}
+ 	}
+ 	return const_cast<char *>(s);
+ }

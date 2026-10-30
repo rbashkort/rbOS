@@ -1,0 +1,26 @@
+[submodule "mlibc"]
+	path = mlibc
+	url = https://github.com/managarm/mlibc.git
+[submodule "ports/pixman"]
+	path = ports/pixman
+	url = https://gitlab.freedesktop.org/pixman/pixman.git
+	branch = master
+	ignore = untracked
+[submodule "ports/oksh"]
+	path = ports/oksh
+	url = https://github.com/ibara/oksh.git
+	branch = main
+	ignore = untracked
+[submodule "ports/sbase"]
+	path = ports/sbase
+	url = https://git.suckless.org/sbase
+	branch = master
+	ignore = untracked
+[submodule "ports/tcc"]
+	path = ports/tcc
+	url = https://github.com/TinyCC/tinycc.git
+	branch = mob
+	ignore = untracked
+[submodule "kernel"]
+	path = kernel
+	url = git@github.com:rbashkort/rbkernel.git

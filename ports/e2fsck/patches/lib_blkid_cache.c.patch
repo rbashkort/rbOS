@@ -1,0 +1,20 @@
+--- pristine/e2fsprogs-1.47.2/lib/blkid/cache.c	2025-01-01 11:24:42.000000000 +0500
++++ e2fsprogs-1.47.2/lib/blkid/cache.c	2026-09-05 23:13:31.882679340 +0500
+@@ -24,7 +24,7 @@
+ #else
+ #define PR_GET_DUMPABLE 3
+ #endif
+-#if (!defined(HAVE_PRCTL) && defined(linux))
++#if (!defined(HAVE_PRCTL) && defined(linux) && !defined(__rbos__))
+ #include <sys/syscall.h>
+ #endif
+ #ifdef HAVE_SYS_STAT_H
+@@ -43,7 +43,7 @@
+ 	if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0)
+ 		return NULL;
+ #else
+-#if (defined(linux) && defined(SYS_prctl))
++#if (defined(linux) && defined(SYS_prctl) && !defined(__rbos__))
+ 	if (syscall(SYS_prctl, PR_GET_DUMPABLE, 0, 0, 0, 0) == 0)
+ 		return NULL;
+ #endif

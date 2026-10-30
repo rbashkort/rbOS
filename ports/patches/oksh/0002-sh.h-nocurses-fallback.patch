@@ -1,0 +1,39 @@
+diff --git a/sh.h b/sh.h
+index 6951da3..0bd618f 100644
+--- a/sh.h
++++ b/sh.h
+@@ -36,6 +36,34 @@
+ 
+ #define	LINE	4096		/* input line size */
+ 
++/* For porting */
++typedef void (*sig_t)(int);
++
++#ifndef ERR
++#define ERR (-1)
++#endif
++
++extern void *cur_term;
++extern char *clear_screen;
++
++static inline int tputs(const char *str, int affcnt, int (*putc_func)(int)) {
++    (void)str; (void)affcnt; (void)putc_func;
++    return 0;
++}
++
++static inline int setupterm(const char *term, int fildes, int *errret) {
++    (void)term; (void)fildes;
++    if (errret) *errret = -1;
++    return -1;
++}
++
++static inline int del_curterm(void *terminal) {
++    (void)terminal;
++    return 0;
++}
++
++/* For porting */
++
+ extern	const char *kshname;	/* $0 */
+ extern	pid_t	kshpid;		/* $$, shell pid */
+ extern	pid_t	procpid;	/* pid of executing process */

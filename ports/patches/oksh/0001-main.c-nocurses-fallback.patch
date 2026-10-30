@@ -1,0 +1,17 @@
+diff --git a/main.c b/main.c
+index 05b0388..d27ca96 100644
+--- a/main.c
++++ b/main.c
+@@ -28,6 +28,12 @@ static void	remove_temps(struct temp *tp);
+ static int	is_restricted(char *name);
+ static void	init_username(void);
+ 
++/* Dummy definitions for ncurses fallback (FOR PORTING)*/
++void *cur_term = NULL;
++char *clear_screen = NULL;
++
++/*FOR PORTING*/
++
+ const char *kshname;
+ pid_t	kshpid;
+ pid_t	procpid;

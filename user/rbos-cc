@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -e
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+MLIBC_SYSROOT_INC="$ROOT_DIR/sysroot/usr/include"
+MLIBC_SYSDEPS_INC="$ROOT_DIR/mlibc-sysdeps/sysdeps/rbos/include"
+MLIBC_SRC="$ROOT_DIR/mlibc"
+MLIBC_LIB="$ROOT_DIR/sysroot/usr/lib"
+MLIBC_SYSROOT="$ROOT_DIR/sysroot"
+GCC_INC="$(gcc -print-file-name=include)"
+
+# ---- GCC-provided CRT objects & libgcc -------------------------------
+CRTBEGIN="$(gcc -print-file-name=crtbegin.o)"
+CRTEND="$(gcc -print-file-name=crtend.o)"
+LIBGCC="$(gcc -print-libgcc-file-name)"
+
+# ---- mlibc-provided CRT objects (crti/crtn are optional) -------------
+CRT0="$MLIBC_LIB/crt0.o"
+CRTI=""
+CRTN=""
+[ -f "$MLIBC_LIB/crti.o" ] && CRTI="$MLIBC_LIB/crti.o"
+[ -f "$MLIBC_LIB/crtn.o" ] && CRTN="$MLIBC_LIB/crtn.o"
+
+# ---- Flags -----------------------------------------------------------
+CFLAGS="-Wall -Wextra -O2 -mcmodel=small -fno-pic -fno-pie -fno-stack-protector"
+CFLAGS="$CFLAGS -mno-red-zone"
+CFLAGS="$CFLAGS -nostdlib -ffreestanding -nostdinc"
+
+# rbOS target marker; OpenBSD-compatible standard-header names are opt-in.
+RBOS_DEFS="-D__rbos__=1"
+if [ "${RBOS_OPENBSD_COMPAT:-0}" = "1" ]; then
+    RBOS_DEFS="$RBOS_DEFS -D__RBOS_OPENBSD_COMPAT__=1"
+fi
+CFLAGS="$CFLAGS $RBOS_DEFS"
+
+# Includes: sysroot + mlibc options (POSIX/ANSI)
+CFLAGS="$CFLAGS -isystem $MLIBC_SYSROOT_INC"
+CFLAGS="$CFLAGS -isystem $MLIBC_SRC/options/posix/include"
+CFLAGS="$CFLAGS -isystem $MLIBC_SRC/options/ansi/include"
+CFLAGS="$CFLAGS -isystem $MLIBC_SRC/options/bits/include"
+CFLAGS="$CFLAGS -isystem $MLIBC_SYSDEPS_INC"
+CFLAGS="$CFLAGS -isystem $GCC_INC"
+
+LDFLAGS="-nostdlib -no-pie -L$MLIBC_LIB"
+# --sysroot hides the host library directories: without it, any -l<name>
+# missing from the sysroot silently resolves to a host .so (e.g. libm.so.6),
+# poisoning the binary with an unsatisfiable DT_NEEDED. Absolute -L paths
+# (like $MLIBC_LIB above) are NOT remapped, so sysroot libs keep working.
+# NOTE: --sysroot does NOT hide the -L search dirs gcc injects itself
+# (toolchain-relative paths with `..` that resolve to host /usr/lib*), so a
+# post-link check below is the real backstop: it fails the build loudly if
+# any DT_NEEDED cannot be satisfied from the sysroot.
+LDFLAGS="$LDFLAGS --sysroot=$MLIBC_SYSROOT"
+
+# Output file of this link: the -o argument, or a.out by default.
+link_output() {
+    local prev="" a
+    for a in "${ARGS[@]}"; do
+        if [ "$prev" = "-o" ]; then printf '%s' "$a"; return 0; fi
+        case "$a" in
+            -o?*) printf '%s' "${a#-o}"; return 0 ;;
+        esac
+        prev="$a"
+    done
+    printf 'a.out'
+}
+
+# Fail loudly if the link pulled a host shared library.
+# A host .so links fine here but panics the guest rtld with
+# "Could not satisfy dependency". Every DT_NEEDED must resolve to a file
+# inside the sysroot (/lib or /usr/lib, where the guest loader looks).
+check_sysroot_libs() {
+    local out="$1" lib
+    for lib in $(readelf -d "$out" 2>/dev/null | grep -oP 'Shared library: \[\K[^]]+'); do
+        lib=$(basename "$lib")
+        if [ ! -f "$MLIBC_SYSROOT/lib/$lib" ] && [ ! -f "$MLIBC_SYSROOT/usr/lib/$lib" ]; then
+            echo "rbos-cc: error: $out needs $lib, which is NOT in the sysroot" >&2
+            echo "rbos-cc: a host library leaked into the link (check -l flags)" >&2
+            rm -f "$out"
+            return 1
+        fi
+    done
+}
+
+# ---- Parse our meta-flags robustly -----------------------------------
+COMPILE_ONLY=0
+DYNAMIC=0
+ARGS=()
+
+for arg in "$@"; do
+    case "$arg" in
+        -c|-E|-S|-M|-MM|-MD)  COMPILE_ONLY=1; ARGS+=("$arg") ;;
+        -dynamic)             DYNAMIC=1 ;;
+        -static-pie)          STATIC_PIE=1 ;;
+        -dynamic-pie)         DYNAMIC_PIE=1 ;;
+        *)                    ARGS+=("$arg") ;;
+    esac
+done
+
+# ---- Compile-only: no linking, no CRT files --------------------------
+if [ "$COMPILE_ONLY" -eq 1 ]; then
+    exec gcc $CFLAGS "${ARGS[@]}"
+fi
+
+# ---- Link ------------------------------------------------------------
+if [ "$STATIC_PIE" = 1 ]; then
+    # Static PIE: PIC objects + self-relocating startup. The existing
+    # libc.a objects are already PIC-clean (only PC32/PLT32 in .text),
+    # so no separate libc_pic.a is needed; rcrt1.o provides _start,
+    # __dso_handle and the RELATIVE/IRELATIVE self-relocation.
+    # NOTE: host crtbegin.o/crtend.o are deliberately omitted — they
+    # carry absolute R_X86_64_32 relocs (and their own __dso_handle),
+    # so static PIE has no .init/.fini bracketing: C++ static
+    # ctors/dtors and .init_array constructors do NOT run (documented
+    # v1 limitation; plain C programs are unaffected).
+    RCRT1="$MLIBC_LIB/rcrt1.o"
+    [ -f "$RCRT1" ] || { echo "rbos-cc: rcrt1.o missing (rebuild mlibc static)" >&2; exit 1; }
+    CFLAGS_PIE="-Wall -Wextra -O2 -mcmodel=small -fPIE -fno-stack-protector"
+    CFLAGS_PIE="$CFLAGS_PIE -mno-red-zone"
+    CFLAGS_PIE="$CFLAGS_PIE -nostdlib -ffreestanding -nostdinc $RBOS_DEFS"
+    CFLAGS_PIE="$CFLAGS_PIE -isystem $MLIBC_SYSROOT_INC"
+    CFLAGS_PIE="$CFLAGS_PIE -isystem $MLIBC_SRC/options/posix/include"
+    CFLAGS_PIE="$CFLAGS_PIE -isystem $MLIBC_SRC/options/ansi/include"
+    CFLAGS_PIE="$CFLAGS_PIE -isystem $MLIBC_SRC/options/bits/include"
+    CFLAGS_PIE="$CFLAGS_PIE -isystem $MLIBC_SYSDEPS_INC"
+    CFLAGS_PIE="$CFLAGS_PIE -isystem $GCC_INC"
+    gcc $CFLAGS_PIE -nostdlib -pie -static-pie -L$MLIBC_LIB --sysroot="$MLIBC_SYSROOT" \
+        "$RCRT1" ${CRTI:+"$CRTI"} \
+        "${ARGS[@]}" \
+        -lc "$LIBGCC" \
+        ${CRTN:+"$CRTN"} || exit 1
+    check_sysroot_libs "$(link_output)" || exit 1
+elif [ "$DYNAMIC_PIE" = 1 ]; then
+    # Dynamic PIE: same objects as -dynamic (crt0.o is already PIC-clean:
+    # RIP-relative main reference, PLT call into ld.so), just compiled
+    # -fPIE and linked -pie. No Scrt1.o needed — ld.so relocates the main
+    # image via its PT_PHDR like any other ET_DYN object.
+    CFLAGS_DPIE="-Wall -Wextra -O2 -mcmodel=small -fPIE -fno-stack-protector"
+    CFLAGS_DPIE="$CFLAGS_DPIE -mno-red-zone"
+    CFLAGS_DPIE="$CFLAGS_DPIE -nostdlib -ffreestanding -nostdinc $RBOS_DEFS"
+    CFLAGS_DPIE="$CFLAGS_DPIE -isystem $MLIBC_SYSROOT_INC"
+    CFLAGS_DPIE="$CFLAGS_DPIE -isystem $MLIBC_SRC/options/posix/include"
+    CFLAGS_DPIE="$CFLAGS_DPIE -isystem $MLIBC_SRC/options/ansi/include"
+    CFLAGS_DPIE="$CFLAGS_DPIE -isystem $MLIBC_SRC/options/bits/include"
+    CFLAGS_DPIE="$CFLAGS_DPIE -isystem $MLIBC_SYSDEPS_INC"
+    CFLAGS_DPIE="$CFLAGS_DPIE -isystem $GCC_INC"
+    # NOTE: crtbeginS.o/crtendS.o (PIC variants), not crtbegin.o/crtend.o:
+    # the non-PIC ones carry absolute R_X86_64_32 relocs and cannot link -pie.
+    CRTBEGIN_S="$(gcc -print-file-name=crtbeginS.o)"
+    CRTEND_S="$(gcc -print-file-name=crtendS.o)"
+    gcc $CFLAGS_DPIE -nostdlib -pie -L$MLIBC_LIB --sysroot="$MLIBC_SYSROOT" \
+        "$CRT0" ${CRTI:+"$CRTI"} "$CRTBEGIN_S" \
+        "${ARGS[@]}" \
+        -lc "$LIBGCC" \
+        "$CRTEND_S" ${CRTN:+"$CRTN"} \
+        -Wl,-dynamic-linker=/usr/lib/ld.so || exit 1
+    check_sysroot_libs "$(link_output)" || exit 1
+elif [ "$DYNAMIC" = 1 ]; then
+    gcc $CFLAGS $LDFLAGS \
+        "$CRT0" ${CRTI:+"$CRTI"} "$CRTBEGIN" \
+        "${ARGS[@]}" \
+        -lc "$LIBGCC" \
+        "$CRTEND" ${CRTN:+"$CRTN"} \
+        -Wl,-dynamic-linker=/usr/lib/ld.so || exit 1
+    check_sysroot_libs "$(link_output)" || exit 1
+else
+    gcc $CFLAGS $LDFLAGS -static \
+        "$CRT0" ${CRTI:+"$CRTI"} "$CRTBEGIN" \
+        "${ARGS[@]}" \
+        -lc "$LIBGCC" \
+        "$CRTEND" ${CRTN:+"$CRTN"} || exit 1
+    check_sysroot_libs "$(link_output)" || exit 1
+fi

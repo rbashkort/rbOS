@@ -1,0 +1,50 @@
+#!/bin/sh
+# Minimal tcc driver for rbOS.
+#
+# The image has no gcc, and the binutils ld currently mis-parses short
+# options under mlibc's getopt_long_only, so use tcc's own linker instead of
+# spawning /usr/bin/ld. /usr/lib/crt0.o is mlibc's startup (there is no
+# crt1.o / crti.o / crtn.o in the rbOS sysroot), and libtcc1.a supplies
+# tcc's own compiler helpers. tcc's default include path is only
+# /usr/include, so its private headers (stddef.h, stdarg.h, ...) need an
+# explicit -I.
+if [ "$#" -eq 0 ]; then
+    echo "cc: no input files"
+    exit 1
+fi
+OUT="a.out"
+COMPILE_ONLY=0
+SRC=""
+EXTRA_FLAGS=""
+LIBS=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -c) COMPILE_ONLY=1; shift ;;
+        -o) OUT="$2"; shift 2 ;;
+        -l*) LIBS="$LIBS $1"; shift ;;
+        *.c) SRC="$SRC $1"; shift ;;
+        *) EXTRA_FLAGS="$EXTRA_FLAGS $1"; shift ;;
+    esac
+done
+TCC_INC="-I/usr/lib/tcc/include"
+# rbOS markers (mirror user/rbos-cc): __rbos__ is always defined;
+# __RBOS_OPENBSD_COMPAT__ opts into pledge()/arc4random* in their
+# standard headers (no __OpenBSD__ emulation, Linux ABI is primary).
+TCC_DEFS="-D__rbos__=1 -D__RBOS_OPENBSD_COMPAT__=1"
+
+if [ "$COMPILE_ONLY" -eq 1 ]; then
+    exec tcc -c $TCC_INC $TCC_DEFS $EXTRA_FLAGS $SRC -o "$OUT"
+fi
+TMP_OBJ="/tmp/__cc_$$.o"
+trap 'rm -f "$TMP_OBJ"' EXIT INT TERM
+tcc -c $TCC_INC $TCC_DEFS $EXTRA_FLAGS $SRC -o "$TMP_OBJ" || exit 1
+tcc $TCC_INC $TCC_DEFS -nostdlib -o "$OUT" \
+   "$TMP_OBJ" \
+   /usr/lib/crt0.o \
+   /usr/lib/libtcc1.a \
+   -L/usr/lib $LIBS -lc \
+   -Wl,-dynamic-linker,/lib/ld.so
+RC=$?
+rm -f "$TMP_OBJ"
+trap - EXIT INT TERM
+exit $RC

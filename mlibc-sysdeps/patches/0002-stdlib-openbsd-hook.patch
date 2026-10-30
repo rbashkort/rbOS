@@ -1,0 +1,15 @@
+--- a/options/ansi/include/stdlib.h
++++ b/options/ansi/include/stdlib.h
+@@ -135,5 +135,12 @@
+ #	include <bits/glibc/glibc_stdlib.h>
+ #endif
+ 
++/* rbOS P7.0b: OpenBSD-compatible declarations in their standard header.
++ * _DEFAULT_SOURCE matches glibc's arc4random exposure; the explicit
++ * __RBOS_OPENBSD_COMPAT__ opt-in also enables it for ports. */
++#if defined(__rbos__) && (defined(_DEFAULT_SOURCE) || defined(__RBOS_OPENBSD_COMPAT__))
++#	include <bits/rbos/openbsd_stdlib.h>
++#endif
++
+ #endif /* _STDLIB_H */
+ 

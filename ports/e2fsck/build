@@ -1,0 +1,103 @@
+#!/bin/sh
+# Build static e2fsck for rbOS.
+# Usage: ./build (from ports/e2fsck) — produces b/e2fsck-static.
+# Steps: unpack vendored tarball -> apply patches/ -> configure against
+# the rbOS sysroot (bundled libuuid/libblkid, no NLS/uuidd/fuse) ->
+# build dependency libs -> link e2fsck statically (manual link: the stock
+# e2fsck.static target pulls host -ldl/-lpthread).
+#
+# NOTE: the build tree is called `b`, not `build` — that name is taken
+# by this script itself (rm -rf below must never match $0).
+set -e
+cd "$(dirname "$0")"
+PORTDIR="$PWD"
+WRAP="$PORTDIR/rbos-cc-wrap.sh"
+
+SRC=e2fsprogs-1.47.2.tar.gz
+SRC_URL=https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.2/e2fsprogs-1.47.2.tar.gz
+SRC_SHA256=7a959221c1b1cc6e28b7d7a4e204a2ffd8ec6d8a2de4461c482b64c5f4463cca
+TREE=e2fsprogs-1.47.2
+BUILD=b
+
+if [ -f "$BUILD/e2fsck-static" ]; then
+    echo "e2fsck: already built ($BUILD/e2fsck-static)"
+    exit 0
+fi
+
+# Release tarball is fetched, not vendored (`make fetch` does the same).
+if [ ! -f "$SRC" ]; then
+    echo "=== e2fsck: downloading $SRC ==="
+    curl -fL -o "$SRC" "$SRC_URL"
+fi
+echo "$SRC_SHA256  $SRC" | sha256sum -c -
+
+echo "=== e2fsck: unpacking ==="
+rm -rf "$TREE" "$BUILD"
+tar xzf "$SRC"
+
+echo "=== e2fsck: applying rbOS patches ==="
+# Patch headers are "pristine/e2fsprogs-1.47.2/..." vs
+# "e2fsprogs-1.47.2/...", so -p2 from inside the tree lands on lib/....
+# $p is relative to this script's dir; patch -d only affects where the
+# patch is APPLIED, the shell still opens "$p" from here.
+for p in patches/*.patch; do
+    patch -d "$TREE" -p2 --forward --silent < "$p" || {
+        echo "patch $p did not apply"
+        exit 1
+    }
+done
+
+echo "=== e2fsck: configuring ==="
+mkdir -p "$BUILD"
+cd "$BUILD"
+"../$TREE/configure" --host=x86_64-unknown-linux-gnu \
+    --disable-nls --disable-uuidd --disable-fuse2fs \
+    --enable-libuuid --enable-libblkid \
+    CC="$WRAP" \
+    ac_cv_lib_uuid_uuid_generate=no \
+    ac_cv_lib_blkid_blkid_get_cache=no \
+    > configure.log 2>&1 || { tail -20 configure.log; exit 1; }
+
+echo "=== e2fsck: building libs ==="
+# Order matters: lib/ext2fs generates ext2_err.h which lib/e2p and
+# lib/support include. (Upstream builds them earlier but regenerates via
+# top-level deps; standalone per-lib builds need ext2fs first.)
+# lib/ss is skipped: only debugfs needs it.
+for lib in lib/et lib/uuid lib/blkid lib/ext2fs lib/e2p lib/support; do
+    make -C "$lib" > /dev/null || { echo "build failed in $lib"; exit 1; }
+done
+
+echo "=== e2fsck: building objects ==="
+# NOTE: the stock `e2fsck` link target always fails here (it pulls host
+# -ldl/-lpthread: fixed by our manual static link below). Object files are
+# complete at that point; verify one before continuing so real compile
+# errors surface.
+make -C e2fsck e2fsck > e2fsck-build.log 2>&1 || true
+test -f e2fsck/pass1.o || { tail -20 e2fsck-build.log; echo "e2fsck objects failed"; exit 1; }
+
+echo "=== e2fsck: static link (manual: stock target pulls host -ldl/-lpthread) ==="
+cp ../sbrk_shim.c e2fsck/sbrk_shim.c
+"$WRAP" -c -o e2fsck/sbrk_shim.o e2fsck/sbrk_shim.c
+python3 - << 'PYEOF'
+p = "e2fsck/Makefile"
+s = open(p).read()
+old = "\textents.o encrypted_files.o"
+assert old in s, "OBJS line not found - regenerate port"
+s = s.replace(old, "\textents.o encrypted_files.o sbrk_shim.o", 1)
+open(p, "w").write(s)
+PYEOF
+# Link with the port CC wrapper directly (static, rbOS sysroot libs only).
+# Runs from $BUILD so the output lands at b/e2fsck-static.
+"$WRAP" -static -o e2fsck-static \
+    e2fsck/unix.o e2fsck/e2fsck.o e2fsck/super.o e2fsck/pass1.o \
+    e2fsck/pass1b.o e2fsck/pass2.o e2fsck/pass3.o e2fsck/pass4.o \
+    e2fsck/pass5.o e2fsck/journal.o e2fsck/badblocks.o e2fsck/util.o \
+    e2fsck/dirinfo.o e2fsck/dx_dirinfo.o e2fsck/ehandler.o \
+    e2fsck/problem.o e2fsck/message.o e2fsck/quota.o e2fsck/recovery.o \
+    e2fsck/region.o e2fsck/revoke.o e2fsck/ea_refcount.o e2fsck/rehash.o \
+    e2fsck/logfile.o e2fsck/sigcatcher.o e2fsck/readahead.o \
+    e2fsck/extents.o e2fsck/encrypted_files.o e2fsck/sbrk_shim.o \
+    lib/libsupport.a lib/libext2fs.a lib/libcom_err.a \
+    lib/libblkid.a lib/libuuid.a lib/libuuid.a lib/libe2p.a
+echo "=== e2fsck: built $BUILD/e2fsck-static ==="
+ls -la "$PORTDIR/$BUILD/e2fsck-static"

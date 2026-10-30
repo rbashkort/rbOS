@@ -1,0 +1,14 @@
+--- a/options/posix/include/unistd.h
++++ b/options/posix/include/unistd.h
+@@ -499,5 +499,11 @@
+ #	include <bits/linux/linux_unistd.h>
+ #endif
+ 
++/* rbOS P7.0b: OpenBSD-compatible declarations in their standard header.
++ * Opt-in via ports/rbos-cc (RBOS_OPENBSD_COMPAT=1). */
++#if defined(__rbos__) && defined(__RBOS_OPENBSD_COMPAT__)
++#	include <bits/rbos/openbsd_unistd.h>
++#endif
++
+ #endif /* _UNISTD_H */
+ 
